@@ -13,18 +13,14 @@ import { LocalStorageAdapter } from './localstorage.js';
 import { JsonBlobAdapter }     from './jsonblob.js';
 import { PasteRsAdapter }      from './pasteurs.js';
 
-const flag = new URLSearchParams(location.search).get('relay');
+function resolveAdapter() {
+  const flag = new URLSearchParams(location.search).get('relay');
+  if (flag === 'localstorage') return LocalStorageAdapter;
+  if (flag === 'pasteurs')     return PasteRsAdapter;
+  if (flag === 'jsonblob')     return JsonBlobAdapter;
 
-let RelayAdapter;
-if (flag === 'localstorage') {
-  RelayAdapter = LocalStorageAdapter;
-} else if (flag === 'pasteurs') {
-  RelayAdapter = PasteRsAdapter;
-} else if (flag === 'jsonblob') {
-  RelayAdapter = JsonBlobAdapter;
-} else {
   const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-  RelayAdapter = isLocal ? LocalStorageAdapter : JsonBlobAdapter;
+  return isLocal ? LocalStorageAdapter : JsonBlobAdapter;
 }
 
-export { RelayAdapter };
+export const RelayAdapter = resolveAdapter();
