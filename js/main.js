@@ -1,4 +1,4 @@
-import { RelayAdapter } from './relay/index.js';
+import { relay } from './relay/index.js';
 import { RtcPeer } from './rtc.js';
 import { UI } from './ui.js';
 import { withRetry, parseHash } from './util.js';
@@ -8,7 +8,7 @@ const RDV_PREFIX = 'p2p-rdv-';
 class App {
   #state = 'HOME';
   #peer = null;
-  #relay = new RelayAdapter();
+  #relay = relay;
 
   // ── State ─────────────────────────────────────────────────────────────────
 
