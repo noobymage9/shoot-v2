@@ -6,164 +6,115 @@ const ICE_SERVERS = [
 const ICE_GATHERING_TIMEOUT_MS = 15_000;
 const CHANNEL_OPEN_TIMEOUT_MS = 30_000;
 
-/**
- * Create a new RTCPeerConnection with the project's ICE config.
- * @returns {RTCPeerConnection}
- */
-function makePc() {
-  return new RTCPeerConnection({ iceServers: ICE_SERVERS });
-}
+export class RtcPeer {
+  #pc;
+  #channels = null;
 
-/**
- * Wait for ICE gathering to complete (null sentinel) or timeout.
- * @param {RTCPeerConnection} pc
- * @returns {Promise<void>}
- */
-function waitForIce(pc) {
-  return Promise.race([
-    new Promise((resolve) => {
-      pc.addEventListener('icegatheringstatechange', function handler() {
-        if (pc.iceGatheringState === 'complete') {
-          pc.removeEventListener('icegatheringstatechange', handler);
-          resolve();
-        }
-      });
-      // Also handle the null candidate sentinel
-      pc.addEventListener('icecandidate', function handler(e) {
-        if (e.candidate === null) {
-          pc.removeEventListener('icecandidate', handler);
-          resolve();
-        }
-      });
-    }),
-    new Promise((_, reject) =>
-      setTimeout(
-        () => reject(new Error('ICE gathering timed out after 15s')),
-        ICE_GATHERING_TIMEOUT_MS,
-      ),
-    ),
-  ]);
-}
-
-/**
- * Create both DataChannels on Peer A's connection.
- * Returns { reliable, unreliable } channel handles.
- * @param {RTCPeerConnection} pc
- * @returns {{ reliable: RTCDataChannel, unreliable: RTCDataChannel }}
- */
-function createChannels(pc) {
-  const reliable = pc.createDataChannel('reliable', { ordered: true });
-  const unreliable = pc.createDataChannel('unreliable', {
-    ordered: false,
-    maxRetransmits: 0,
-  });
-  return { reliable, unreliable };
-}
-
-/**
- * Peer A: create offer SDP (with all ICE candidates bundled).
- * @returns {Promise<{ pc: RTCPeerConnection, sdp: string, channels: { reliable: RTCDataChannel, unreliable: RTCDataChannel } }>}
- */
-export async function createPeerA() {
-  const pc = makePc();
-  const channels = createChannels(pc);
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  await waitForIce(pc);
-
-  return { pc, sdp: pc.localDescription.sdp, channels };
-}
-
-/**
- * Peer A: apply Peer B's answer SDP.
- * @param {RTCPeerConnection} pc
- * @param {string} sdp  Raw SDP text from Peer B
- * @returns {Promise<void>}
- */
-export async function applyAnswer(pc, sdp) {
-  await pc.setRemoteDescription({ type: 'answer', sdp });
-}
-
-/**
- * Peer B: consume Peer A's offer and return answer SDP.
- * @param {string} offerSdp
- * @returns {Promise<{ pc: RTCPeerConnection, sdp: string }>}
- */
-export async function createPeerB(offerSdp) {
-  const pc = makePc();
-
-  await pc.setRemoteDescription({ type: 'offer', sdp: offerSdp });
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  await waitForIce(pc);
-
-  return { pc, sdp: pc.localDescription.sdp };
-}
-
-/**
- * Peer B: wait for both DataChannels (reliable + unreliable) to be received.
- * Returns them once both are open.
- * @param {RTCPeerConnection} pc
- * @returns {Promise<{ reliable: RTCDataChannel, unreliable: RTCDataChannel }>}
- */
-export function waitForDataChannels(pc) {
-  return Promise.race([
-    new Promise((resolve) => {
-      const received = {};
-      pc.addEventListener('datachannel', function handler(e) {
-        received[e.channel.label] = e.channel;
-        if (received.reliable && received.unreliable) {
-          pc.removeEventListener('datachannel', handler);
-          // Wait for both to open
-          Promise.all(
-            [received.reliable, received.unreliable].map(
-              (ch) =>
-                ch.readyState === 'open'
-                  ? Promise.resolve()
-                  : new Promise((r) => ch.addEventListener('open', r, { once: true })),
-            ),
-          ).then(() => resolve({ reliable: received.reliable, unreliable: received.unreliable }));
-        }
-      });
-    }),
-    new Promise((_, reject) =>
-      setTimeout(
-        () => reject(new Error('DataChannel setup timed out')),
-        CHANNEL_OPEN_TIMEOUT_MS,
-      ),
-    ),
-  ]);
-}
-
-/**
- * Wait for Peer A's channels to open (reliable + unreliable).
- * @param {{ reliable: RTCDataChannel, unreliable: RTCDataChannel }} channels
- * @returns {Promise<void>}
- */
-export function waitForChannelsOpen(channels) {
-  return Promise.race([
-    Promise.all(
-      Object.values(channels).map((ch) =>
-        ch.readyState === 'open'
-          ? Promise.resolve()
-          : new Promise((resolve) => ch.addEventListener('open', resolve, { once: true })),
-      ),
-    ),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Connection timed out')), CHANNEL_OPEN_TIMEOUT_MS),
-    ),
-  ]);
-}
-
-/**
- * Send a text message over the reliable DataChannel.
- * @param {RTCDataChannel} channel
- * @param {string} text
- */
-export function sendMessage(channel, text) {
-  if (channel.readyState !== 'open') {
-    throw new Error('DataChannel is not open');
+  constructor() {
+    this.#pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   }
-  channel.send(text);
+
+  // ── Peer A ────────────────────────────────────────────────────────────────
+
+  async createOffer() {
+    this.#channels = {
+      reliable:   this.#pc.createDataChannel('reliable',   { ordered: true }),
+      unreliable: this.#pc.createDataChannel('unreliable', { ordered: false, maxRetransmits: 0 }),
+    };
+    const offer = await this.#pc.createOffer();
+    await this.#pc.setLocalDescription(offer);
+    await this.#waitForIce();
+    return this.#pc.localDescription.sdp;
+  }
+
+  async applyAnswer(sdp) {
+    await this.#pc.setRemoteDescription({ type: 'answer', sdp });
+  }
+
+  waitForChannelsOpen() {
+    return this.#raceTimeout(
+      Promise.all(
+        Object.values(this.#channels).map((ch) =>
+          ch.readyState === 'open'
+            ? Promise.resolve()
+            : new Promise((r) => ch.addEventListener('open', r, { once: true })),
+        ),
+      ),
+      CHANNEL_OPEN_TIMEOUT_MS,
+      'Connection timed out',
+    );
+  }
+
+  // ── Peer B ────────────────────────────────────────────────────────────────
+
+  async createAnswer(offerSdp) {
+    await this.#pc.setRemoteDescription({ type: 'offer', sdp: offerSdp });
+    const answer = await this.#pc.createAnswer();
+    await this.#pc.setLocalDescription(answer);
+    await this.#waitForIce();
+    return this.#pc.localDescription.sdp;
+  }
+
+  waitForDataChannels() {
+    return this.#raceTimeout(
+      new Promise((resolve) => {
+        const received = {};
+        this.#pc.addEventListener('datachannel', (e) => {
+          received[e.channel.label] = e.channel;
+          if (!received.reliable || !received.unreliable) return;
+          this.#channels = received;
+          Promise.all(
+            Object.values(received).map((ch) =>
+              ch.readyState === 'open'
+                ? Promise.resolve()
+                : new Promise((r) => ch.addEventListener('open', r, { once: true })),
+            ),
+          ).then(() => resolve());
+        });
+      }),
+      CHANNEL_OPEN_TIMEOUT_MS,
+      'DataChannel setup timed out',
+    );
+  }
+
+  // ── Shared ────────────────────────────────────────────────────────────────
+
+  get reliableChannel() {
+    return this.#channels?.reliable ?? null;
+  }
+
+  sendMessage(text) {
+    const ch = this.reliableChannel;
+    if (!ch || ch.readyState !== 'open') throw new Error('DataChannel is not open');
+    ch.send(text);
+  }
+
+  close() {
+    this.#pc.close();
+  }
+
+  // ── Private ───────────────────────────────────────────────────────────────
+
+  #waitForIce() {
+    return this.#raceTimeout(
+      new Promise((resolve) => {
+        if (this.#pc.iceGatheringState === 'complete') return resolve();
+        this.#pc.addEventListener('icecandidate', (e) => {
+          if (e.candidate === null) resolve();
+        });
+        this.#pc.addEventListener('icegatheringstatechange', () => {
+          if (this.#pc.iceGatheringState === 'complete') resolve();
+        });
+      }),
+      ICE_GATHERING_TIMEOUT_MS,
+      'ICE gathering timed out after 15s',
+    );
+  }
+
+  #raceTimeout(promise, ms, message) {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+    ]);
+  }
 }

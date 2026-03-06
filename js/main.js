@@ -1,232 +1,213 @@
-/**
- * main.js — Entry point and state machine.
- *
- * Peer A flow: HOME → GENERATING_OFFER → SHARE_OFFER → APPLYING_ANSWER → CONNECTING → CONNECTED
- * Peer B flow: LOADING_OFFER → GENERATING_ANSWER → SHARE_ANSWER → CONNECTING → CONNECTED
- * ERROR reachable from any state → "Start Over" → HOME
- */
-
 import { RelayAdapter } from './relay/index.js';
-import {
-  createPeerA,
-  applyAnswer,
-  createPeerB,
-  waitForDataChannels,
-  waitForChannelsOpen,
-  sendMessage,
-} from './rtc.js';
-import {
-  showScreen,
-  renderShareOffer,
-  renderShareAnswer,
-  appendMessage,
-  showError,
-  getAnswerInput,
-  wireCopyButton,
-} from './ui.js';
+import { RtcPeer } from './rtc.js';
+import { UI } from './ui.js';
 import { withRetry, parseHash } from './util.js';
 
-// ── State ────────────────────────────────────────────────────────────────────
+const RDV_PREFIX = 'p2p-rdv-';
 
-let state = 'HOME';
-let peerConnection = null;   // RTCPeerConnection
-let reliableChannel = null;  // RTCDataChannel for chat / game events
-// unreliableChannel left wired but unused in chat POC
+class App {
+  #state = 'HOME';
+  #peer = null;
+  #relay = new RelayAdapter();
 
-function setState(next) {
-  state = next;
-  console.debug('[state]', next);
-}
+  // ── State ─────────────────────────────────────────────────────────────────
 
-// ── Relay ────────────────────────────────────────────────────────────────────
-
-const relay = new RelayAdapter();
-
-// ── Peer A flow ──────────────────────────────────────────────────────────────
-
-async function startPeerA() {
-  setState('GENERATING_OFFER');
-  showScreen('screen-generating-offer');
-
-  let pc, offerSdp, channels;
-  try {
-    ({ pc, sdp: offerSdp, channels } = await createPeerA());
-  } catch (err) {
-    return handleError('Failed to create offer: ' + err.message);
+  #setState(next) {
+    this.#state = next;
+    console.debug('[state]', next);
   }
 
-  peerConnection = pc;
+  // ── Same-origin auto-connect ──────────────────────────────────────────────
 
-  let offerId;
-  try {
-    offerId = await withRetry(() => relay.publish(offerSdp));
-  } catch (err) {
-    return handleError(err.message);
+  #watchForAnswer(offerId, onAnswer) {
+    const key = RDV_PREFIX + offerId;
+    const existing = localStorage.getItem(key);
+    if (existing) {
+      localStorage.removeItem(key);
+      onAnswer(existing);
+      return;
+    }
+    const handler = (e) => {
+      if (e.key !== key || !e.newValue) return;
+      window.removeEventListener('storage', handler);
+      localStorage.removeItem(key);
+      onAnswer(e.newValue);
+    };
+    window.addEventListener('storage', handler);
   }
 
-  setState('SHARE_OFFER');
-  renderShareOffer(offerId);
+  #signalAnswer(offerId, answerId) {
+    localStorage.setItem(RDV_PREFIX + offerId, answerId);
+  }
 
-  // Peer A waits for channels to open (triggered once Peer B connects)
-  waitForChannelsOpen(channels)
-    .then(() => {
-      reliableChannel = channels.reliable;
-      wireChannelMessages(reliableChannel);
-      setState('CONNECTED');
-      showScreen('screen-connected');
-    })
-    .catch((err) => handleError('Connection failed — both devices may be on restricted networks.'));
+  // ── Peer A ────────────────────────────────────────────────────────────────
 
-  // "Connect" button on share-offer screen: load answer by paste ID
-  document.getElementById('connect-btn').addEventListener('click', async () => {
-    const answerId = getAnswerInput();
-    if (!answerId) return;
-
-    setState('APPLYING_ANSWER');
-    showScreen('screen-connecting');
+  async #connectWithAnswer(peer, answerId) {
+    this.#setState('APPLYING_ANSWER');
+    UI.showScreen('screen-connecting');
 
     let answerSdp;
     try {
-      answerSdp = await withRetry(() => relay.fetch(answerId));
+      answerSdp = await withRetry(() => this.#relay.fetch(answerId));
     } catch (err) {
-      return handleError(err.message);
+      return this.#handleError(err.message);
     }
 
     try {
-      await applyAnswer(pc, answerSdp);
+      await peer.applyAnswer(answerSdp);
     } catch (err) {
-      return handleError('Failed to apply answer: ' + err.message);
+      return this.#handleError('Failed to apply answer: ' + err.message);
     }
 
-    setState('CONNECTING');
-    // Waiting for channels — handled by the promise above
-  });
-}
+    this.#setState('CONNECTING');
 
-// ── Peer B flow ──────────────────────────────────────────────────────────────
-
-async function startPeerB(offerId) {
-  setState('LOADING_OFFER');
-  showScreen('screen-generating-offer');
-
-  let offerSdp;
-  try {
-    offerSdp = await withRetry(() => relay.fetch(offerId));
-  } catch (err) {
-    return handleError(err.message);
-  }
-
-  setState('GENERATING_ANSWER');
-
-  let pc, answerSdp;
-  try {
-    ({ pc, sdp: answerSdp } = await createPeerB(offerSdp));
-  } catch (err) {
-    return handleError('Failed to create answer: ' + err.message);
-  }
-
-  peerConnection = pc;
-
-  let answerId;
-  try {
-    answerId = await withRetry(() => relay.publish(answerSdp));
-  } catch (err) {
-    return handleError(err.message);
-  }
-
-  setState('SHARE_ANSWER');
-  renderShareAnswer(answerId);
-
-  setState('CONNECTING');
-
-  let channels;
-  try {
-    channels = await waitForDataChannels(pc);
-  } catch (err) {
-    return handleError('Connection failed — both devices may be on restricted networks.');
-  }
-
-  reliableChannel = channels.reliable;
-  wireChannelMessages(reliableChannel);
-  setState('CONNECTED');
-  showScreen('screen-connected');
-}
-
-// ── Shared: receive messages ─────────────────────────────────────────────────
-
-function wireChannelMessages(channel) {
-  channel.addEventListener('message', (e) => {
-    appendMessage('remote', e.data);
-  });
-  channel.addEventListener('close', () => {
-    handleError('Connection closed by the other peer.');
-  });
-  channel.addEventListener('error', (e) => {
-    handleError('DataChannel error: ' + (e.message || 'unknown'));
-  });
-}
-
-// ── Error handling ───────────────────────────────────────────────────────────
-
-function handleError(message) {
-  setState('ERROR');
-  if (peerConnection) {
-    peerConnection.close();
-    peerConnection = null;
-  }
-  reliableChannel = null;
-  showError(message);
-}
-
-// ── Boot ─────────────────────────────────────────────────────────────────────
-
-function boot() {
-  // Wire copy buttons
-  wireCopyButton('copy-offer-btn', 'offer-link-text');
-  wireCopyButton('copy-answer-btn', 'answer-link-text');
-
-  // "Start Over" from error screen
-  document.getElementById('start-over-btn').addEventListener('click', () => {
-    history.replaceState(null, '', location.pathname);
-    setState('HOME');
-    showScreen('screen-home');
-  });
-
-  // Chat form submit
-  document.getElementById('chat-form').addEventListener('submit', (e) => {
-    e.preventDefault();
-    const input = document.getElementById('message-input');
-    const text = input.value.trim();
-    if (!text || !reliableChannel) return;
     try {
-      sendMessage(reliableChannel, text);
-      appendMessage('local', text);
-      input.value = '';
+      await peer.waitForChannelsOpen();
+      this.#wireChannelMessages(peer);
+      this.#setState('CONNECTED');
+      UI.showScreen('screen-connected');
     } catch (err) {
-      handleError('Send failed: ' + err.message);
+      this.#handleError('Connection failed — both devices may be on restricted networks.');
     }
-  });
+  }
 
-  // "Start New Chat" button
-  document.getElementById('start-chat-btn').addEventListener('click', () => {
-    startPeerA();
-  });
+  async #startPeerA() {
+    this.#setState('GENERATING_OFFER');
+    UI.showScreen('screen-generating-offer');
 
-  // Check hash — auto-start Peer B if offer= present
-  const { role, pasteId } = parseHash();
-  if (role === 'peerB' && pasteId) {
-    startPeerB(pasteId);
-  } else if (role === 'peerA' && pasteId) {
-    // Auto-load answer if hash contains answer=
-    showScreen('screen-connecting');
-    // Re-use startPeerA path is not applicable here;
-    // this case is for deep-linking after Peer A already made an offer.
-    // Handled by the connect-btn flow above if user has already started Peer A.
-    // Show home as fallback.
-    showScreen('screen-home');
-  } else {
-    showScreen('screen-home');
+    const peer = new RtcPeer();
+    this.#peer = peer;
+
+    let offerSdp;
+    try {
+      offerSdp = await peer.createOffer();
+    } catch (err) {
+      return this.#handleError('Failed to create offer: ' + err.message);
+    }
+
+    let offerId;
+    try {
+      offerId = await withRetry(() => this.#relay.publish(offerSdp));
+    } catch (err) {
+      return this.#handleError(err.message);
+    }
+
+    this.#setState('SHARE_OFFER');
+    UI.renderShareOffer(offerId);
+
+    this.#watchForAnswer(offerId, (answerId) => {
+      if (this.#state !== 'SHARE_OFFER') return;
+      this.#connectWithAnswer(peer, answerId);
+    });
+
+    document.getElementById('connect-btn').addEventListener('click', () => {
+      if (this.#state !== 'SHARE_OFFER') return;
+      const answerId = UI.getAnswerInput();
+      if (!answerId) return;
+      this.#connectWithAnswer(peer, answerId);
+    });
+  }
+
+  // ── Peer B ────────────────────────────────────────────────────────────────
+
+  async #startPeerB(offerId) {
+    this.#setState('LOADING_OFFER');
+    UI.showScreen('screen-generating-offer');
+
+    let offerSdp;
+    try {
+      offerSdp = await withRetry(() => this.#relay.fetch(offerId));
+    } catch (err) {
+      return this.#handleError(err.message);
+    }
+
+    this.#setState('GENERATING_ANSWER');
+
+    const peer = new RtcPeer();
+    this.#peer = peer;
+
+    let answerSdp;
+    try {
+      answerSdp = await peer.createAnswer(offerSdp);
+    } catch (err) {
+      return this.#handleError('Failed to create answer: ' + err.message);
+    }
+
+    let answerId;
+    try {
+      answerId = await withRetry(() => this.#relay.publish(answerSdp));
+    } catch (err) {
+      return this.#handleError(err.message);
+    }
+
+    this.#signalAnswer(offerId, answerId);
+    this.#setState('SHARE_ANSWER');
+    UI.renderShareAnswer(answerId);
+    this.#setState('CONNECTING');
+
+    try {
+      await peer.waitForDataChannels();
+      this.#wireChannelMessages(peer);
+      this.#setState('CONNECTED');
+      UI.showScreen('screen-connected');
+    } catch (err) {
+      this.#handleError('Connection failed — both devices may be on restricted networks.');
+    }
+  }
+
+  // ── Shared ────────────────────────────────────────────────────────────────
+
+  #wireChannelMessages(peer) {
+    const ch = peer.reliableChannel;
+    ch.addEventListener('message', (e) => UI.appendMessage('remote', e.data));
+    ch.addEventListener('close', () => this.#handleError('Connection closed by the other peer.'));
+    ch.addEventListener('error', (e) => this.#handleError('DataChannel error: ' + (e.message || 'unknown')));
+  }
+
+  #handleError(message) {
+    this.#setState('ERROR');
+    this.#peer?.close();
+    this.#peer = null;
+    UI.showError(message);
+  }
+
+  // ── Boot ──────────────────────────────────────────────────────────────────
+
+  boot() {
+    UI.wireCopyButton('copy-offer-btn', 'offer-link-text');
+    UI.wireCopyButton('copy-answer-btn', 'answer-link-text');
+
+    document.getElementById('start-over-btn').addEventListener('click', () => {
+      history.replaceState(null, '', location.pathname);
+      this.#setState('HOME');
+      UI.showScreen('screen-home');
+    });
+
+    document.getElementById('chat-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const input = document.getElementById('message-input');
+      const text = input.value.trim();
+      if (!text || !this.#peer) return;
+      try {
+        this.#peer.sendMessage(text);
+        UI.appendMessage('local', text);
+        input.value = '';
+      } catch (err) {
+        this.#handleError('Send failed: ' + err.message);
+      }
+    });
+
+    document.getElementById('start-chat-btn').addEventListener('click', () => {
+      this.#startPeerA();
+    });
+
+    const { role, pasteId } = parseHash();
+    if (role === 'peerB' && pasteId) {
+      this.#startPeerB(pasteId);
+      return;
+    }
+    UI.showScreen('screen-home');
   }
 }
 
-document.addEventListener('DOMContentLoaded', boot);
+document.addEventListener('DOMContentLoaded', () => new App().boot());
