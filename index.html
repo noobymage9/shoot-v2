@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>P2P Chat</title>
+  <link rel="stylesheet" href="css/app.css" />
+  <!-- qrcode.js by davidshimjs via cdnjs -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+
+<!-- ── Home ────────────────────────────────────────────────────────────────── -->
+<div class="app" id="screen-home">
+  <div class="card">
+    <h1 class="card__title">P2P Chat</h1>
+    <p class="card__subtitle">
+      Serverless, browser-to-browser messaging via WebRTC.
+      No account. No server. Nothing stored.
+    </p>
+    <button id="start-chat-btn" class="btn btn--primary btn--full">
+      Start New Chat
+    </button>
+    <p class="limitation-note">
+      Requires both peers to be reachable by STUN (no TURN). May fail on
+      corporate or carrier-grade NAT networks.
+    </p>
+  </div>
+</div>
+
+<!-- ── Generating / loading (spinner) ──────────────────────────────────────── -->
+<div class="app" id="screen-generating-offer" hidden>
+  <div class="card" style="text-align:center;">
+    <div class="spinner"></div>
+    <p class="spinner-label">Setting up connection…</p>
+  </div>
+</div>
+
+<!-- ── Share offer (Peer A) ─────────────────────────────────────────────────── -->
+<div class="app" id="screen-share-offer" hidden>
+  <div class="card">
+    <h2 class="card__title">Share this link</h2>
+    <p class="card__subtitle">
+      Send the link or QR code to the other person. They'll open it, then give
+      you their answer ID.
+    </p>
+
+    <!-- Link row -->
+    <div class="link-row">
+      <input type="text" id="offer-link-text" readonly aria-label="Offer link" />
+      <button id="copy-offer-btn" class="btn btn--ghost">Copy</button>
+    </div>
+
+    <!-- QR code -->
+    <div class="qr-container" id="offer-qr"></div>
+
+    <!-- Answer input -->
+    <div class="answer-section">
+      <label for="answer-id-input">Paste the answer ID from the other person:</label>
+      <input
+        type="text"
+        id="answer-id-input"
+        placeholder="e.g. abc123"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button id="connect-btn" class="btn btn--primary btn--full">Connect</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Share answer (Peer B) ─────────────────────────────────────────────────── -->
+<div class="app" id="screen-share-answer" hidden>
+  <div class="card">
+    <h2 class="card__title">Send your answer</h2>
+    <p class="card__subtitle">
+      Share this link or ID with Peer A so they can complete the connection.
+    </p>
+
+    <div class="link-row">
+      <input type="text" id="answer-link-text" readonly aria-label="Answer link" />
+      <button id="copy-answer-btn" class="btn btn--ghost">Copy</button>
+    </div>
+
+    <div class="qr-container" id="answer-qr"></div>
+
+    <p class="text-muted mt-2" style="text-align:center;">
+      Waiting for Peer A to connect…
+    </p>
+    <div class="spinner mt-1"></div>
+  </div>
+</div>
+
+<!-- ── Connecting (spinner) ─────────────────────────────────────────────────── -->
+<div class="app" id="screen-connecting" hidden>
+  <div class="card" style="text-align:center;">
+    <div class="spinner"></div>
+    <p class="spinner-label">Establishing connection…</p>
+    <p class="text-muted mt-2">
+      This may take a few seconds depending on your network.
+    </p>
+  </div>
+</div>
+
+<!-- ── Connected / chat ─────────────────────────────────────────────────────── -->
+<div id="screen-connected" hidden>
+  <div class="chat-wrapper">
+    <div class="chat-header">
+      <span class="status-dot"></span>
+      Connected — P2P Chat
+    </div>
+    <ul class="message-log" id="message-log" aria-live="polite" aria-label="Messages"></ul>
+    <form class="chat-form" id="chat-form" autocomplete="off">
+      <input
+        type="text"
+        id="message-input"
+        placeholder="Type a message…"
+        aria-label="Message"
+        autofocus
+      />
+      <button type="submit" class="btn btn--primary">Send</button>
+    </form>
+  </div>
+</div>
+
+<!-- ── Error ────────────────────────────────────────────────────────────────── -->
+<div class="app" id="screen-error" hidden>
+  <div class="card">
+    <div class="error-icon">⚠</div>
+    <h2 class="card__title">Something went wrong</h2>
+    <p class="error-message" id="error-message">An unknown error occurred.</p>
+    <button id="start-over-btn" class="btn btn--danger btn--full">Start Over</button>
+    <p class="limitation-note mt-2">
+      Known limitations: symmetric NAT may prevent direct connections (no TURN
+      server configured). If the relay is blocked by your browser, swap the
+      backend in <code>js/relay/index.js</code>.
+    </p>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
